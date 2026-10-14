@@ -30,7 +30,7 @@ from .events import GENESIS_HASH, EventType, compute_hash, verify_chain
 from .replay import ReplayContext, ReplayResult, replay
 from .store import DEFAULT_ROOT, SessionStore, list_sessions, load_session
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = [
     "session",
