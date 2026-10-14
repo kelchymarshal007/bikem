@@ -17,6 +17,8 @@ warning and goes silent. Playback must never crash because of audio.
 from __future__ import annotations
 
 import base64
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -36,7 +38,8 @@ class Speaker:
 
     def __init__(self, rate: int = 175, enabled: bool = True, voice: str | None = None):
         self.rate = rate
-        self.voice = voice
+        # Fall back to BIKEM_VOICE env var if no explicit voice was given.
+        self.voice = voice or os.environ.get("BIKEM_VOICE") or None
         self._backend: str | None = None
         self._warned = False
         if enabled:
@@ -64,13 +67,33 @@ class Speaker:
         return None
 
     def say(self, text: str) -> None:
-        """Speak text. Silent no-op if no backend or if anything fails."""
+        """Speak a paragraph. Never raises.
+
+        Windows/WSL: one PowerShell process speaks all sentences inside
+        a single Speak() loop -- no per-sentence relaunch, so no gap.
+        macOS/Linux: one subprocess per sentence is cheap, no delay.
+        """
         if not self._backend or not text:
             return
-        # Truncate -- long text stalls the animation.
+        parts = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
+        if not parts:
+            parts = [text.strip()]
+        try:
+            if self._backend in ("wsl-sapi", "windows"):
+                ps = _WSL_POWERSHELL if self._backend == "wsl-sapi" else "powershell"
+                self._say_powershell(ps, parts)
+            else:
+                for part in parts:
+                    self._say_one(part)
+        except Exception:
+            if not self._warned:
+                print("[dim]bikem: TTS failed, continuing silently[/dim]")
+                self._warned = True
+
+    def _say_one(self, text: str) -> None:
+        """Speak a single short utterance. Never raises."""
         if len(text) > 240:
             text = text[:237] + "..."
-
         try:
             if self._backend == "wsl-sapi":
                 self._say_powershell(_WSL_POWERSHELL, text)
@@ -80,14 +103,14 @@ class Speaker:
                 subprocess.run(
                     ["say", "-r", str(self.rate), text],
                     capture_output=True,
-                    timeout=30,
+                    timeout=60,
                     check=False,
                 )
             else:  # espeak-ng / espeak
                 subprocess.run(
                     [self._backend, "-s", str(self.rate), text],
                     capture_output=True,
-                    timeout=30,
+                    timeout=60,
                     check=False,
                 )
         except Exception:
@@ -95,25 +118,32 @@ class Speaker:
                 print("[dim]bikem: TTS failed, continuing silently[/dim]")
                 self._warned = True
 
-    def _say_powershell(self, ps_cmd: str, text: str) -> None:
-        # Use -EncodedCommand to sidestep all shell-quoting issues.
-        # WSL -> Windows interop mangles single quotes in -Command, which
-        # truncates the text to a single character. Base64 avoids that.
-        safe = text.replace("'", "''")
+    def _say_powershell(self, ps_cmd: str, sentences: list[str]) -> None:
+        """Speak a list of sentences in a single PowerShell process.
+
+        One process launch, one .NET runtime boot, all Speak() calls in
+        a loop. Avoids both the 2-3s cold-start cost per sentence AND
+        the last-word clipping that plagues long single-utterance calls.
+        """
+        escaped = [s.replace("'", "''") for s in sentences]
+        array_literal = ", ".join(f"'{s}'" for s in escaped)
         voice_line = ""
         if self.voice:
             voice_safe = self.voice.replace("'", "''")
-            voice_line = "try { $s.SelectVoice('" + voice_safe + "') } catch {}; "
+            voice_line = f"try {{ $s.SelectVoice('{voice_safe}') }} catch {{}}; "
         script = (
             "Add-Type -AssemblyName System.Speech; "
             "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-            "$s.Rate = 0; " + voice_line + f"$s.Speak('{safe}')"
+            "$s.Rate = 0; "
+            + voice_line
+            + f"$texts = @({array_literal}); "
+            + "foreach ($t in $texts) { $s.Speak($t) }"
         )
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
         subprocess.run(
             [ps_cmd, "-EncodedCommand", encoded],
             capture_output=True,
-            timeout=30,
+            timeout=180,
             check=False,
         )
 

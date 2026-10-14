@@ -36,6 +36,14 @@ def _snip(text: str, n: int = 120) -> str:
     return text if len(text) <= n else text[: n - 1].rstrip() + "\u2026"
 
 
+def _end(text: str) -> str:
+    """Ensure a sentence ends with exactly one period, no doubles."""
+    t = text.rstrip()
+    while t and t[-1] in ".!?\u2026":
+        t = t[:-1]
+    return t + "."
+
+
 def narrate(events: list[Event]) -> str:
     """Return a 2-4 sentence English summary of a session."""
     if not events:
@@ -150,21 +158,23 @@ def narrate(events: list[Event]) -> str:
             sentences.append(f"Tools called: {listed}.")
 
     # ---- Sentence 5: issues ----
+    errors_mentioned = False
     if errors:
         first_err = (errors[0].payload or {}).get("error") or "unknown error"
         if len(errors) == 1:
-            sentences.append(f"There was 1 error: {_snip(first_err, 100)}.")
+            sentences.append(_end(f"There was 1 error: {_snip(first_err, 100)}"))
         else:
             sentences.append(
-                f"There were {len(errors)} errors, the first being: {_snip(first_err, 100)}."
+                _end(f"There were {len(errors)} errors, the first being: {_snip(first_err, 100)}")
             )
+        errors_mentioned = True
 
     if drifts:
         first_drift = (drifts[0].payload or {}).get("reason") or "unspecified drift"
         if len(drifts) == 1:
-            sentences.append(f"Drift was detected: {_snip(first_drift, 100)}.")
+            sentences.append(_end(f"Drift was detected: {_snip(first_drift, 100)}"))
         else:
-            sentences.append(f"{len(drifts)} drift flags fired during the session.")
+            sentences.append(f"{len(drifts)} drift flags fired during the session")
 
     # ---- Sentence 6: closing verdict ----
     status = (end.payload or {}).get("status", "ok")
@@ -172,8 +182,11 @@ def narrate(events: list[Event]) -> str:
         sentences.append("Session completed cleanly.")
     elif status == "ok":
         sentences.append("Session ended, but not without issues.")
+    elif errors_mentioned:
+        # Already narrated the error above; close simply.
+        sentences.append("Session ended without completing.")
     else:
         err = (end.payload or {}).get("error") or "unknown"
-        sentences.append(f"Session ended with an error: {_snip(err, 100)}.")
+        sentences.append(_end(f"Session ended with an error: {_snip(err, 100)}"))
 
     return " ".join(sentences)
