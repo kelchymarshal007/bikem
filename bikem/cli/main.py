@@ -2,17 +2,20 @@
 
 Commands:
 
-    bikem list              List recent sessions
-    bikem show <id>         Pretty-print a session trace
-    bikem verify <id>       Verify hash chain integrity
-    bikem path <id>         Print the raw JSONL file path
-    bikem stats             Summary across all sessions
+    bikem list                  List recent sessions
+    bikem show <id>             Pretty-print a session trace
+    bikem play <id>             Animate a session like a video
+    bikem diff <id1> <id2>      Compare two sessions, find first divergence
+    bikem verify <id>           Verify hash chain integrity
+    bikem path <id>             Print the raw JSONL file path
+    bikem stats                 Summary across all sessions
 """
 
 from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 
 import click
 from rich.console import Console
@@ -21,13 +24,16 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from ..diff import diff_sessions
+from ..diff import summarize as diff_summarize
 from ..events import Event, EventType, verify_chain
+from ..narrate import narrate
 from ..store import SessionStore, list_sessions, load_session
+from ..voice import Speaker, list_voices
 
 console = Console()
 err_console = Console(stderr=True)
 
-# Colours per event type -- keeps a long trace scannable at a glance.
 _TYPE_STYLE = {
     EventType.SESSION_START.value: "bold green",
     EventType.SESSION_END.value: "bold green",
@@ -38,6 +44,18 @@ _TYPE_STYLE = {
     EventType.CONTEXT_INJECT.value: "magenta",
     EventType.DRIFT_FLAG.value: "bold red",
     EventType.ERROR.value: "bold red",
+}
+
+_ICONS = {
+    EventType.SESSION_START.value: ("\u25b6", "bold green"),
+    EventType.SESSION_END.value: ("\u25a0", "bold green"),
+    EventType.LLM_REQUEST.value: ("\u2192", "cyan"),
+    EventType.LLM_RESPONSE.value: ("\u2190", "bright_cyan"),
+    EventType.TOOL_CALL.value: ("\u2699", "yellow"),
+    EventType.TOOL_RESULT.value: ("\u2713", "bright_yellow"),
+    EventType.CONTEXT_INJECT.value: ("\u2295", "magenta"),
+    EventType.DRIFT_FLAG.value: ("\u26a0", "bold red"),
+    EventType.ERROR.value: ("\u2717", "bold red"),
 }
 
 
@@ -54,42 +72,67 @@ def _shorten(s: str, n: int = 60) -> str:
     return s if len(s) <= n else s[: n - 1] + "..."
 
 
-def _summary_line(ev: Event) -> Text:
-    style = _TYPE_STYLE.get(ev.type, "white")
-    t = Text()
-    t.append(f"{ev.seq:>4}  ", style="dim")
-    t.append(ev.ts or "", style="dim")
-    t.append("  ")
-    t.append(f"{ev.type:<16}", style=style)
+def _parse_ts(ts: str):
+    if not ts:
+        return None
+    try:
+        s = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
 
+
+def _payload_summary(ev: Event) -> str:
     p = ev.payload or {}
-    if ev.type == EventType.LLM_REQUEST.value:
+    t = ev.type
+    if t == EventType.SESSION_START.value:
+        return f'"{p.get("name") or "unnamed"}"'
+    if t == EventType.SESSION_END.value:
+        s = p.get("status", "ok")
+        if s == "ok":
+            return "ok"
+        return f"{s} \u00b7 {p.get('error', '')}"
+    if t == EventType.LLM_REQUEST.value:
         model = p.get("model") or "?"
-        t.append(f" {model}  ", style="bold")
         body = p.get("body") or {}
+        n = 0
         if isinstance(body, dict):
-            msgs = body.get("messages")
-            if isinstance(msgs, list):
-                t.append(f"{len(msgs)} msgs")
-    elif ev.type == EventType.LLM_RESPONSE.value:
-        t.append(f" status={p.get('status')}")
+            n = len(body.get("messages") or [])
+        return f"{model} \u00b7 {n} msg" + ("s" if n != 1 else "")
+    if t == EventType.LLM_RESPONSE.value:
+        parts = [str(p.get("status", "?"))]
         if p.get("streaming"):
-            t.append("  streaming", style="dim")
+            parts.append("streaming")
         body = p.get("body") or {}
         if isinstance(body, dict):
             choices = body.get("choices")
             if isinstance(choices, list) and choices:
                 msg = choices[0].get("message", {}).get("content", "")
                 if isinstance(msg, str) and msg:
-                    t.append("  " + _shorten(msg))
-    elif ev.type == EventType.ERROR.value:
-        t.append(f" {p.get('error', '')}", style="red")
-    elif ev.type == EventType.SESSION_START.value:
-        t.append(f" {p.get('name', '')}")
-    else:
-        body = json.dumps(p, default=str)
-        if body != "{}":
-            t.append(" " + _shorten(body))
+                    parts.append(_shorten(msg, 50))
+        return " \u00b7 ".join(parts)
+    if t == EventType.ERROR.value:
+        return str(p.get("error", ""))
+    return _shorten(json.dumps(p, default=str), 60)
+
+
+def _event_line(ev: Event, base_ts) -> Text:
+    icon, style = _ICONS.get(ev.type, ("\u2022", "white"))
+    offset = ""
+    ev_ts = _parse_ts(ev.ts)
+    if base_ts is not None and ev_ts is not None:
+        delta = (ev_ts - base_ts).total_seconds()
+        offset = f"{delta:+6.2f}s"
+
+    t = Text()
+    t.append("  ")
+    t.append(icon, style=style)
+    t.append("  ")
+    t.append(f"#{ev.seq:<3}", style="dim")
+    t.append(f"{offset:>8}  ", style="dim")
+    t.append(f"{ev.type:<17}", style=style)
+    t.append(" ")
+    t.append(_payload_summary(ev))
     return t
 
 
@@ -118,8 +161,6 @@ def cmd_list(limit: int, root: str | None) -> None:
     table.add_column("Modified", style="dim")
     table.add_column("Events", justify="right")
 
-    from datetime import datetime
-
     for s in sessions[:limit]:
         try:
             mtime = datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
@@ -137,7 +178,6 @@ def cmd_list(limit: int, root: str | None) -> None:
 
 
 def _resolve_id(session_id: str, root: str | None) -> str | None:
-    """Allow prefix matching: `bikem show 3f9a` finds sess_...3f9a..."""
     known = {s["session_id"] for s in list_sessions(root=root)}
     if session_id in known:
         return session_id
@@ -171,7 +211,7 @@ def cmd_show(session_id: str, root: str | None, full: bool, type_filter: str | N
     for ev in events:
         if type_filter and ev.type != type_filter:
             continue
-        console.print(_summary_line(ev))
+        console.print(_event_line(ev, None))
         if full:
             payload = json.dumps(ev.payload, indent=2, default=str)
             console.print(
@@ -181,6 +221,185 @@ def cmd_show(session_id: str, root: str | None, full: bool, type_filter: str | N
                     border_style="dim",
                 )
             )
+
+
+@main.command("play")
+@click.argument("session_id")
+@click.option("--root", default=None)
+@click.option("--speed", default=1.0, type=float, help="Playback speed (2.0 = faster).")
+@click.option("--step", is_flag=True, help="Advance one event at a time.")
+@click.option("--no-animate", is_flag=True, help="Print all events at once.")
+@click.option("-s", "--speak", is_flag=True, help="Speak each event aloud via OS TTS.")
+@click.option("--rate", default=175, type=int, show_default=True, help="TTS speed in words/min.")
+@click.option("--voice", default=None, help="TTS voice name (see: bikem voices).")
+def cmd_play(
+    session_id: str,
+    root: str | None,
+    speed: float,
+    step: bool,
+    no_animate: bool,
+    speak: bool,
+    rate: int,
+    voice: str | None,
+) -> None:
+    """Play back a session trace like a video."""
+    resolved = _resolve_id(session_id, root)
+    if resolved is None:
+        err_console.print(f"[red]No session matches {session_id!r}.[/red]")
+        raise SystemExit(1)
+
+    events = load_session(resolved, root=root)
+    if not events:
+        err_console.print(f"[yellow]Session {resolved} has no events.[/yellow]")
+        raise SystemExit(1)
+
+    start = next((e for e in events if e.type == EventType.SESSION_START.value), events[0])
+    end = next((e for e in reversed(events) if e.type == EventType.SESSION_END.value), events[-1])
+    name = (start.payload or {}).get("name") or "unnamed"
+    base = _parse_ts(start.ts)
+    end_ts = _parse_ts(end.ts)
+    duration = (end_ts - base).total_seconds() if base and end_ts else 0.0
+
+    drifts = sum(1 for e in events if e.type == EventType.DRIFT_FLAG.value)
+    errors = sum(1 for e in events if e.type == EventType.ERROR.value)
+
+    speaker = Speaker(rate=rate, enabled=speak, voice=voice) if speak else None
+
+    header = Text()
+    header.append("  bikem", style="bold")
+    header.append("  \u00b7  ", style="dim")
+    header.append(resolved, style="cyan")
+    header.append("  \u00b7  ", style="dim")
+    header.append(f'"{name}"', style="bold")
+    header.append("        ")
+    header.append(f"{len(events)} events", style="")
+    header.append("  \u00b7  ", style="dim")
+    header.append(f"{duration:.2f}s", style="")
+    header.append("  \u00b7  ", style="dim")
+    if drifts or errors:
+        header.append(f"{drifts} drift \u00b7 {errors} errors", style="bold red")
+    else:
+        header.append("clean", style="green")
+    if speaker and speaker.available:
+        header.append("  \u00b7  ", style="dim")
+        header.append(f"voice: {speaker.backend}", style="dim")
+    console.print(header)
+    console.rule(style="dim")
+
+    lines = [_event_line(ev, base) for ev in events]
+
+    # ---- Phase 1: visual ----
+    if no_animate or step:
+        for ln in lines:
+            console.print(ln)
+            if step:
+                try:
+                    console.input("[dim]  \u21b5 [/dim]")
+                except (EOFError, KeyboardInterrupt):
+                    break
+    else:
+        delay = 0.4 / max(speed, 0.1)
+        try:
+            for ln in lines:
+                console.print(ln)
+                time.sleep(delay)
+        except KeyboardInterrupt:
+            pass
+
+    console.print()
+
+    # ---- Phase 2: audio (independent of phase 1) ----
+    if speaker and speaker.available:
+        summary = narrate(events)
+        console.print("  [dim]\u2500 narration \u2500[/dim]")
+        console.print(f"  [italic]{summary}[/italic]")
+        console.print()
+        try:
+            speaker.say(summary)
+        except KeyboardInterrupt:
+            pass
+        console.print("  [dim]narrated[/dim]")
+        console.print()
+
+
+@main.command("diff")
+@click.argument("left_id")
+@click.argument("right_id")
+@click.option("--root", default=None)
+@click.option("--full", is_flag=True, help="Show full payloads for each divergence.")
+def cmd_diff(left_id: str, right_id: str, root: str | None, full: bool) -> None:
+    """Compare two sessions and report where they first diverge."""
+    left = _resolve_id(left_id, root)
+    right = _resolve_id(right_id, root)
+    if left is None:
+        err_console.print(f"[red]No session matches {left_id!r}.[/red]")
+        raise SystemExit(1)
+    if right is None:
+        err_console.print(f"[red]No session matches {right_id!r}.[/red]")
+        raise SystemExit(1)
+
+    result = diff_sessions(left, right, root=root)
+
+    header = Text()
+    header.append("  diff  ", style="bold")
+    header.append("  \u00b7  ", style="dim")
+    header.append(left, style="cyan")
+    header.append("  \u2194  ", style="dim")
+    header.append(right, style="cyan")
+    console.print(header)
+    console.print(f"  [dim]left:  {result.left_count} events[/dim]")
+    console.print(f"  [dim]right: {result.right_count} events[/dim]")
+    console.rule(style="dim")
+
+    if result.identical:
+        console.print(f"  [green]\u2713 identical[/green]  {result.left_count} events match")
+        return
+
+    summary = diff_summarize(result)
+    console.print(f"  [bold red]\u2717 {summary}[/bold red]")
+    console.print()
+
+    for d in result.divergences[:20]:
+        seq_txt = f"#{d.seq:<4}"
+        kind_style = {
+            "type_mismatch": "bold red",
+            "content_mismatch": "yellow",
+            "missing": "magenta",
+            "extra": "magenta",
+        }.get(d.kind, "white")
+        console.print(f"  {seq_txt} [{kind_style}]{d.kind}[/{kind_style}]  {d.detail}")
+        if full:
+            if d.left is not None:
+                console.print(
+                    Panel(
+                        Syntax(
+                            json.dumps(d.left.payload, indent=2, default=str),
+                            "json",
+                            theme="monokai",
+                            word_wrap=True,
+                        ),
+                        title=f"left seq {d.left.seq}",
+                        border_style="cyan",
+                    )
+                )
+            if d.right is not None:
+                console.print(
+                    Panel(
+                        Syntax(
+                            json.dumps(d.right.payload, indent=2, default=str),
+                            "json",
+                            theme="monokai",
+                            word_wrap=True,
+                        ),
+                        title=f"right seq {d.right.seq}",
+                        border_style="yellow",
+                    )
+                )
+
+    if len(result.divergences) > 20:
+        console.print(f"  [dim]... {len(result.divergences) - 20} more[/dim]")
+
+    raise SystemExit(2)
 
 
 @main.command("verify")
@@ -252,98 +471,13 @@ def cmd_stats(root: str | None) -> None:
         console.print(t)
 
 
-# ---------------------------------------------------------------------------
-# play
-# ---------------------------------------------------------------------------
-
-_ICONS = {
-    EventType.SESSION_START.value: ("▶", "bold green"),
-    EventType.SESSION_END.value: ("■", "bold green"),
-    EventType.LLM_REQUEST.value: ("→", "cyan"),
-    EventType.LLM_RESPONSE.value: ("←", "bright_cyan"),
-    EventType.TOOL_CALL.value: ("⚙", "yellow"),
-    EventType.TOOL_RESULT.value: ("✓", "bright_yellow"),
-    EventType.CONTEXT_INJECT.value: ("⊕", "magenta"),
-    EventType.DRIFT_FLAG.value: ("⚠", "bold red"),
-    EventType.ERROR.value: ("✗", "bold red"),
-}
-
-
-def _parse_ts(ts: str):
-    from datetime import datetime
-
-    if not ts:
-        return None
-    try:
-        s = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
-        return datetime.fromisoformat(s)
-    except Exception:
-        return None
-
-
-def _payload_summary(ev: Event) -> str:
-    p = ev.payload or {}
-    t = ev.type
-    if t == EventType.SESSION_START.value:
-        name = p.get("name") or "unnamed"
-        return f'"{name}"'
-    if t == EventType.SESSION_END.value:
-        s = p.get("status", "ok")
-        if s == "ok":
-            return "ok"
-        return f"{s} · {p.get('error', '')}"
-    if t == EventType.LLM_REQUEST.value:
-        model = p.get("model") or "?"
-        body = p.get("body") or {}
-        n = 0
-        if isinstance(body, dict):
-            n = len(body.get("messages") or [])
-        return f"{model} · {n} msg" + ("s" if n != 1 else "")
-    if t == EventType.LLM_RESPONSE.value:
-        parts = [str(p.get("status", "?"))]
-        if p.get("streaming"):
-            parts.append("streaming")
-        body = p.get("body") or {}
-        if isinstance(body, dict):
-            choices = body.get("choices")
-            if isinstance(choices, list) and choices:
-                msg = choices[0].get("message", {}).get("content", "")
-                if isinstance(msg, str) and msg:
-                    parts.append(_shorten(msg, 50))
-        return " · ".join(parts)
-    if t == EventType.ERROR.value:
-        return str(p.get("error", ""))
-    return _shorten(json.dumps(p, default=str), 60)
-
-
-def _event_line(ev: Event, base_ts) -> Text:
-    icon, style = _ICONS.get(ev.type, ("•", "white"))
-    offset = ""
-    ev_ts = _parse_ts(ev.ts)
-    if base_ts is not None and ev_ts is not None:
-        delta = (ev_ts - base_ts).total_seconds()
-        offset = f"{delta:+6.2f}s"
-
-    t = Text()
-    t.append("  ")
-    t.append(icon, style=style)
-    t.append("  ")
-    t.append(f"#{ev.seq:<3}", style="dim")
-    t.append(f"{offset:>8}  ", style="dim")
-    t.append(f"{ev.type:<17}", style=style)
-    t.append(" ")
-    t.append(_payload_summary(ev))
-    return t
-
-
-@main.command("play")
+@main.command("speak")
 @click.argument("session_id")
 @click.option("--root", default=None)
-@click.option("--speed", default=1.0, type=float, help="Playback speed (2.0 = faster).")
-@click.option("--step", is_flag=True, help="Advance one event at a time.")
-@click.option("--no-animate", is_flag=True, help="Print all events at once.")
-def cmd_play(session_id: str, root: str | None, speed: float, step: bool, no_animate: bool) -> None:
-    """Play back a session trace like a video."""
+@click.option("--rate", default=175, type=int, show_default=True, help="TTS speed in words/min.")
+@click.option("--voice", default=None, help="TTS voice name (see: bikem voices).")
+def cmd_speak(session_id: str, root: str | None, rate: int, voice: str | None) -> None:
+    """Narrate a session aloud. No visual output."""
     resolved = _resolve_id(session_id, root)
     if resolved is None:
         err_console.print(f"[red]No session matches {session_id!r}.[/red]")
@@ -354,54 +488,38 @@ def cmd_play(session_id: str, root: str | None, speed: float, step: bool, no_ani
         err_console.print(f"[yellow]Session {resolved} has no events.[/yellow]")
         raise SystemExit(1)
 
-    start = next((e for e in events if e.type == EventType.SESSION_START.value), events[0])
-    end = next((e for e in reversed(events) if e.type == EventType.SESSION_END.value), events[-1])
-    name = (start.payload or {}).get("name") or "unnamed"
-    base = _parse_ts(start.ts)
-    end_ts = _parse_ts(end.ts)
-    duration = (end_ts - base).total_seconds() if base and end_ts else 0.0
+    speaker = Speaker(rate=rate, enabled=True, voice=voice)
+    if not speaker.available:
+        err_console.print("[red]No TTS backend available.[/red]")
+        err_console.print("[dim]Ubuntu: sudo apt install espeak-ng[/dim]")
+        raise SystemExit(1)
 
-    drifts = sum(1 for e in events if e.type == EventType.DRIFT_FLAG.value)
-    errors = sum(1 for e in events if e.type == EventType.ERROR.value)
-
-    header = Text()
-    header.append("  bikem", style="bold")
-    header.append("  ·  ", style="dim")
-    header.append(resolved, style="cyan")
-    header.append("  ·  ", style="dim")
-    header.append(f'"{name}"', style="bold")
-    header.append("        ")
-    header.append(f"{len(events)} events", style="")
-    header.append("  ·  ", style="dim")
-    header.append(f"{duration:.2f}s", style="")
-    header.append("  ·  ", style="dim")
-    if drifts or errors:
-        header.append(f"{drifts} drift · {errors} errors", style="bold red")
-    else:
-        header.append("clean", style="green")
-    console.print(header)
-    console.rule(style="dim")
-
-    lines = [_event_line(ev, base) for ev in events]
-
-    if no_animate or step:
-        for ln in lines:
-            console.print(ln)
-            if step:
-                try:
-                    console.input("[dim]  ↵ [/dim]")
-                except (EOFError, KeyboardInterrupt):
-                    break
-    else:
-        delay = 0.4 / max(speed, 0.1)
-        try:
-            for ln in lines:
-                console.print(ln)
-                time.sleep(delay)
-        except KeyboardInterrupt:
-            pass
-
+    summary = narrate(events)
+    console.print(f"  [dim]speaking {resolved} ({len(events)} events via {speaker.backend})[/dim]")
+    console.print(f"  [italic]{summary}[/italic]")
     console.print()
+    try:
+        speaker.say(summary)
+    except KeyboardInterrupt:
+        pass
+    console.print("  [dim]done[/dim]")
+
+
+@main.command("voices")
+def cmd_voices() -> None:
+    """List available TTS voices on this machine."""
+    names = list_voices()
+    if not names:
+        console.print("[yellow]No TTS voices detected.[/yellow]")
+        console.print("[dim]Ubuntu: sudo apt install espeak-ng[/dim]")
+        raise SystemExit(1)
+
+    console.print(f"  [bold]{len(names)} voice(s) available[/bold]")
+    console.print()
+    for n in names:
+        console.print(f"  [cyan]{n}[/cyan]")
+    console.print()
+    console.print('  [dim]Use with: bikem play <id> --speak --voice "<name>"[/dim]')
 
 
 if __name__ == "__main__":
