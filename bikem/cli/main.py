@@ -12,6 +12,7 @@ Commands:
 from __future__ import annotations
 
 import json
+import time
 
 import click
 from rich.console import Console
@@ -249,6 +250,158 @@ def cmd_stats(root: str | None) -> None:
             style = _TYPE_STYLE.get(k, "white")
             t.add_row(f"[{style}]{k}[/{style}]", str(by_type[k]))
         console.print(t)
+
+
+# ---------------------------------------------------------------------------
+# play
+# ---------------------------------------------------------------------------
+
+_ICONS = {
+    EventType.SESSION_START.value: ("▶", "bold green"),
+    EventType.SESSION_END.value: ("■", "bold green"),
+    EventType.LLM_REQUEST.value: ("→", "cyan"),
+    EventType.LLM_RESPONSE.value: ("←", "bright_cyan"),
+    EventType.TOOL_CALL.value: ("⚙", "yellow"),
+    EventType.TOOL_RESULT.value: ("✓", "bright_yellow"),
+    EventType.CONTEXT_INJECT.value: ("⊕", "magenta"),
+    EventType.DRIFT_FLAG.value: ("⚠", "bold red"),
+    EventType.ERROR.value: ("✗", "bold red"),
+}
+
+
+def _parse_ts(ts: str):
+    from datetime import datetime
+
+    if not ts:
+        return None
+    try:
+        s = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _payload_summary(ev: Event) -> str:
+    p = ev.payload or {}
+    t = ev.type
+    if t == EventType.SESSION_START.value:
+        name = p.get("name") or "unnamed"
+        return f'"{name}"'
+    if t == EventType.SESSION_END.value:
+        s = p.get("status", "ok")
+        if s == "ok":
+            return "ok"
+        return f"{s} · {p.get('error', '')}"
+    if t == EventType.LLM_REQUEST.value:
+        model = p.get("model") or "?"
+        body = p.get("body") or {}
+        n = 0
+        if isinstance(body, dict):
+            n = len(body.get("messages") or [])
+        return f"{model} · {n} msg" + ("s" if n != 1 else "")
+    if t == EventType.LLM_RESPONSE.value:
+        parts = [str(p.get("status", "?"))]
+        if p.get("streaming"):
+            parts.append("streaming")
+        body = p.get("body") or {}
+        if isinstance(body, dict):
+            choices = body.get("choices")
+            if isinstance(choices, list) and choices:
+                msg = choices[0].get("message", {}).get("content", "")
+                if isinstance(msg, str) and msg:
+                    parts.append(_shorten(msg, 50))
+        return " · ".join(parts)
+    if t == EventType.ERROR.value:
+        return str(p.get("error", ""))
+    return _shorten(json.dumps(p, default=str), 60)
+
+
+def _event_line(ev: Event, base_ts) -> Text:
+    icon, style = _ICONS.get(ev.type, ("•", "white"))
+    offset = ""
+    ev_ts = _parse_ts(ev.ts)
+    if base_ts is not None and ev_ts is not None:
+        delta = (ev_ts - base_ts).total_seconds()
+        offset = f"{delta:+6.2f}s"
+
+    t = Text()
+    t.append("  ")
+    t.append(icon, style=style)
+    t.append("  ")
+    t.append(f"#{ev.seq:<3}", style="dim")
+    t.append(f"{offset:>8}  ", style="dim")
+    t.append(f"{ev.type:<17}", style=style)
+    t.append(" ")
+    t.append(_payload_summary(ev))
+    return t
+
+
+@main.command("play")
+@click.argument("session_id")
+@click.option("--root", default=None)
+@click.option("--speed", default=1.0, type=float, help="Playback speed (2.0 = faster).")
+@click.option("--step", is_flag=True, help="Advance one event at a time.")
+@click.option("--no-animate", is_flag=True, help="Print all events at once.")
+def cmd_play(session_id: str, root: str | None, speed: float, step: bool, no_animate: bool) -> None:
+    """Play back a session trace like a video."""
+    resolved = _resolve_id(session_id, root)
+    if resolved is None:
+        err_console.print(f"[red]No session matches {session_id!r}.[/red]")
+        raise SystemExit(1)
+
+    events = load_session(resolved, root=root)
+    if not events:
+        err_console.print(f"[yellow]Session {resolved} has no events.[/yellow]")
+        raise SystemExit(1)
+
+    start = next((e for e in events if e.type == EventType.SESSION_START.value), events[0])
+    end = next((e for e in reversed(events) if e.type == EventType.SESSION_END.value), events[-1])
+    name = (start.payload or {}).get("name") or "unnamed"
+    base = _parse_ts(start.ts)
+    end_ts = _parse_ts(end.ts)
+    duration = (end_ts - base).total_seconds() if base and end_ts else 0.0
+
+    drifts = sum(1 for e in events if e.type == EventType.DRIFT_FLAG.value)
+    errors = sum(1 for e in events if e.type == EventType.ERROR.value)
+
+    header = Text()
+    header.append("  bikem", style="bold")
+    header.append("  ·  ", style="dim")
+    header.append(resolved, style="cyan")
+    header.append("  ·  ", style="dim")
+    header.append(f'"{name}"', style="bold")
+    header.append("        ")
+    header.append(f"{len(events)} events", style="")
+    header.append("  ·  ", style="dim")
+    header.append(f"{duration:.2f}s", style="")
+    header.append("  ·  ", style="dim")
+    if drifts or errors:
+        header.append(f"{drifts} drift · {errors} errors", style="bold red")
+    else:
+        header.append("clean", style="green")
+    console.print(header)
+    console.rule(style="dim")
+
+    lines = [_event_line(ev, base) for ev in events]
+
+    if no_animate or step:
+        for ln in lines:
+            console.print(ln)
+            if step:
+                try:
+                    console.input("[dim]  ↵ [/dim]")
+                except (EOFError, KeyboardInterrupt):
+                    break
+    else:
+        delay = 0.4 / max(speed, 0.1)
+        try:
+            for ln in lines:
+                console.print(ln)
+                time.sleep(delay)
+        except KeyboardInterrupt:
+            pass
+
+    console.print()
 
 
 if __name__ == "__main__":
