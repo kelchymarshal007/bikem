@@ -24,8 +24,9 @@ import os
 from pathlib import Path
 from typing import Iterator
 
-from . import recorder
+from . import recorder, replay as _replay_module
 from .events import EventType, GENESIS_HASH, compute_hash, verify_chain
+from .replay import ReplayContext, ReplayResult, replay
 from .store import DEFAULT_ROOT, SessionStore, list_sessions, load_session
 
 __version__ = "0.0.1"
@@ -33,6 +34,9 @@ __version__ = "0.0.1"
 __all__ = [
     "session",
     "Session",
+    "replay",
+    "ReplayContext",
+    "ReplayResult",
     "SessionStore",
     "list_sessions",
     "load_session",
