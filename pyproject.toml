@@ -1,6 +1,6 @@
 [project]
 name = "bikem"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local-first memory and drift detection for long AI sessions"
 readme = "README.md"
 license = { text = "MIT" }
