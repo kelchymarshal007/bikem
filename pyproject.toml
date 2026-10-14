@@ -18,10 +18,10 @@ classifiers = [
 dependencies = [
     "click>=8.1",
     "rich>=13.0",
+    "httpx>=0.24",
 ]
 
 [project.optional-dependencies]
-httpx = ["httpx>=0.24"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
 
 [project.scripts]
