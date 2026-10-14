@@ -192,7 +192,37 @@ def cmd_list(limit: int, root: str | None) -> None:
 
 
 def _resolve_id(session_id: str, root: str | None) -> str | None:
-    known = {s["session_id"] for s in list_sessions(root=root)}
+    """Resolve a session id, prefix, or keyword like 'last' / 'last~2'."""
+    sessions = list_sessions(root=root)
+    if not sessions:
+        err_console.print("[yellow]No sessions recorded yet.[/yellow]")
+        err_console.print("[dim]Run some code inside bikem.session() first.[/dim]")
+        return None
+
+    # Keywords: last, latest, prev, last~N, latest~N
+    if session_id in ("last", "latest"):
+        return sessions[0]["session_id"]
+    if session_id == "prev":
+        if len(sessions) < 2:
+            err_console.print("[red]Only 1 session available; no previous.[/red]")
+            return None
+        return sessions[1]["session_id"]
+    if "~" in session_id:
+        head, _, tail = session_id.partition("~")
+        if head in ("last", "latest"):
+            try:
+                n = int(tail)
+            except ValueError:
+                err_console.print(f"[red]Bad offset:[/red] {session_id}")
+                return None
+            if n < 0 or n >= len(sessions):
+                err_console.print(
+                    f"[red]Only {len(sessions)} session(s); asked for last~{n}.[/red]"
+                )
+                return None
+            return sessions[n]["session_id"]
+
+    known = {s["session_id"] for s in sessions}
     if session_id in known:
         return session_id
     matches = [sid for sid in known if sid.endswith(session_id) or session_id in sid]
@@ -204,12 +234,13 @@ def _resolve_id(session_id: str, root: str | None) -> str | None:
 
 
 @main.command("show")
-@click.argument("session_id")
+@click.argument("session_id", required=False)
 @click.option("--root", default=None)
 @click.option("--full", is_flag=True, help="Print full payload JSON for every event.")
 @click.option("--type", "type_filter", default=None, help="Only show events of this type.")
-def cmd_show(session_id: str, root: str | None, full: bool, type_filter: str | None) -> None:
-    """Pretty-print a session trace."""
+def cmd_show(session_id: str | None, root: str | None, full: bool, type_filter: str | None) -> None:
+    """Pretty-print a session trace. Defaults to the latest session."""
+    session_id = session_id or "last"
     resolved = _resolve_id(session_id, root)
     if resolved is None:
         err_console.print(f"[red]No session matches {session_id!r}.[/red]")
@@ -238,7 +269,7 @@ def cmd_show(session_id: str, root: str | None, full: bool, type_filter: str | N
 
 
 @main.command("play")
-@click.argument("session_id")
+@click.argument("session_id", required=False)
 @click.option("--root", default=None)
 @click.option("--speed", default=1.0, type=float, help="Playback speed (2.0 = faster).")
 @click.option("--step", is_flag=True, help="Advance one event at a time.")
@@ -247,7 +278,7 @@ def cmd_show(session_id: str, root: str | None, full: bool, type_filter: str | N
 @click.option("--rate", default=175, type=int, show_default=True, help="TTS speed in words/min.")
 @click.option("--voice", default=None, help="TTS voice name (see: bikem voices).")
 def cmd_play(
-    session_id: str,
+    session_id: str | None,
     root: str | None,
     speed: float,
     step: bool,
@@ -256,7 +287,8 @@ def cmd_play(
     rate: int,
     voice: str | None,
 ) -> None:
-    """Play back a session trace like a video."""
+    """Play back a session trace like a video. Defaults to the latest session."""
+    session_id = session_id or "last"
     resolved = _resolve_id(session_id, root)
     if resolved is None:
         err_console.print(f"[red]No session matches {session_id!r}.[/red]")
@@ -337,12 +369,17 @@ def cmd_play(
 
 
 @main.command("diff")
-@click.argument("left_id")
-@click.argument("right_id")
+@click.argument("left_id", required=False)
+@click.argument("right_id", required=False)
 @click.option("--root", default=None)
 @click.option("--full", is_flag=True, help="Show full payloads for each divergence.")
-def cmd_diff(left_id: str, right_id: str, root: str | None, full: bool) -> None:
-    """Compare two sessions and report where they first diverge."""
+def cmd_diff(left_id: str | None, right_id: str | None, root: str | None, full: bool) -> None:
+    """Compare two sessions and report where they first diverge.
+
+    With no arguments, compares the two most recent sessions.
+    """
+    left_id = left_id or "last~1"
+    right_id = right_id or "last"
     left = _resolve_id(left_id, root)
     right = _resolve_id(right_id, root)
     if left is None:
@@ -417,10 +454,11 @@ def cmd_diff(left_id: str, right_id: str, root: str | None, full: bool) -> None:
 
 
 @main.command("verify")
-@click.argument("session_id")
+@click.argument("session_id", required=False)
 @click.option("--root", default=None)
-def cmd_verify(session_id: str, root: str | None) -> None:
-    """Verify the hash chain of a session."""
+def cmd_verify(session_id: str | None, root: str | None) -> None:
+    """Verify the hash chain of a session. Defaults to the latest session."""
+    session_id = session_id or "last"
     resolved = _resolve_id(session_id, root)
     if resolved is None:
         err_console.print(f"[red]No session matches {session_id!r}.[/red]")
@@ -436,10 +474,11 @@ def cmd_verify(session_id: str, root: str | None) -> None:
 
 
 @main.command("path")
-@click.argument("session_id")
+@click.argument("session_id", required=False)
 @click.option("--root", default=None)
-def cmd_path(session_id: str, root: str | None) -> None:
-    """Print the raw JSONL path for a session."""
+def cmd_path(session_id: str | None, root: str | None) -> None:
+    """Print the raw JSONL path for a session. Defaults to the latest session."""
+    session_id = session_id or "last"
     resolved = _resolve_id(session_id, root)
     if resolved is None:
         err_console.print(f"[red]No session matches {session_id!r}.[/red]")
@@ -486,12 +525,13 @@ def cmd_stats(root: str | None) -> None:
 
 
 @main.command("speak")
-@click.argument("session_id")
+@click.argument("session_id", required=False)
 @click.option("--root", default=None)
 @click.option("--rate", default=175, type=int, show_default=True, help="TTS speed in words/min.")
 @click.option("--voice", default=None, help="TTS voice name (see: bikem voices).")
-def cmd_speak(session_id: str, root: str | None, rate: int, voice: str | None) -> None:
-    """Narrate a session aloud. No visual output."""
+def cmd_speak(session_id: str | None, root: str | None, rate: int, voice: str | None) -> None:
+    """Narrate a session aloud. No visual output. Defaults to the latest session."""
+    session_id = session_id or "last"
     resolved = _resolve_id(session_id, root)
     if resolved is None:
         err_console.print(f"[red]No session matches {session_id!r}.[/red]")
@@ -534,6 +574,19 @@ def cmd_voices() -> None:
         console.print(f"  [cyan]{n}[/cyan]")
     console.print()
     console.print('  [dim]Use with: bikem play <id> --speak --voice "<name>"[/dim]')
+
+
+@main.command("last")
+@click.option("-n", "--count", default=1, show_default=True, help="Print N most recent ids.")
+@click.option("--root", default=None)
+def cmd_last(count: int, root: str | None) -> None:
+    """Print the most recent session id. Pipeable."""
+    sessions = list_sessions(root=root)
+    if not sessions:
+        err_console.print("[yellow]No sessions recorded yet.[/yellow]")
+        raise SystemExit(1)
+    for s in sessions[: max(1, count)]:
+        click.echo(s["session_id"])
 
 
 if __name__ == "__main__":
