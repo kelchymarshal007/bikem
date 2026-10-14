@@ -111,7 +111,21 @@ def _payload_summary(ev: Event) -> str:
                 if isinstance(msg, str) and msg:
                     parts.append(_shorten(msg, 50))
         return " \u00b7 ".join(parts)
+    if t == EventType.TOOL_CALL.value:
+        name = p.get("name", "?")
+        args = p.get("args") or []
+        kwargs = p.get("kwargs") or {}
+        rendered = [_shorten(json.dumps(a, default=str), 20) for a in args] + [
+            f"{k}={_shorten(json.dumps(v, default=str), 20)}" for k, v in kwargs.items()
+        ]
+        return f"{name}({_shorten(', '.join(rendered), 45)})"
+    if t == EventType.TOOL_RESULT.value:
+        name = p.get("name", "?")
+        result = p.get("result")
+        return f"{name} \u2192 {_shorten(json.dumps(result, default=str), 50)}"
     if t == EventType.ERROR.value:
+        if p.get("phase") == "tool":
+            return f"tool {p.get('name', '?')} raised: {_shorten(p.get('error', ''), 40)}"
         return str(p.get("error", ""))
     return _shorten(json.dumps(p, default=str), 60)
 
