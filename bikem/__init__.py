@@ -26,7 +26,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from . import recorder
-from . import replay as _replay_module
 from .events import GENESIS_HASH, EventType, compute_hash, verify_chain
 from .replay import ReplayContext, ReplayResult, replay
 from .store import DEFAULT_ROOT, SessionStore, list_sessions, load_session
@@ -43,6 +42,9 @@ __all__ = [
     "list_sessions",
     "load_session",
     "verify_chain",
+    "GENESIS_HASH",
+    "compute_hash",
+    "DEFAULT_ROOT",
     "__version__",
 ]
 

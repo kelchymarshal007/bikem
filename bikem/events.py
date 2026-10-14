@@ -63,7 +63,7 @@ def now_iso() -> str:
     """UTC timestamp, ISO 8601 with milliseconds."""
     t = time.time()
     ms = int((t - int(t)) * 1000)
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + ".%03dZ" % ms
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + f".{ms:03d}Z"
 
 
 @dataclass
