@@ -17,15 +17,17 @@ Environment:
     BIKEM_HOME      storage root (default: ~/.bikem)
     BIKEM_DISABLE   set to "1" to make session() a no-op
 """
+
 from __future__ import annotations
 
 import contextlib
 import os
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
-from . import recorder, replay as _replay_module
-from .events import EventType, GENESIS_HASH, compute_hash, verify_chain
+from . import recorder
+from . import replay as _replay_module
+from .events import GENESIS_HASH, EventType, compute_hash, verify_chain
 from .replay import ReplayContext, ReplayResult, replay
 from .store import DEFAULT_ROOT, SessionStore, list_sessions, load_session
 
@@ -65,7 +67,7 @@ class Session:
     def trace_path(self) -> Path:
         return self.store.path
 
-    def __enter__(self) -> "Session":
+    def __enter__(self) -> Session:
         self._entered = True
         self.store.append(
             EventType.SESSION_START,

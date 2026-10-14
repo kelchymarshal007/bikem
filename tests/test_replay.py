@@ -1,12 +1,10 @@
-import json
 from pathlib import Path
 
 import httpx
 import pytest
 
-import bikem
 from bikem import replay, session
-from bikem.replay import Replayer, _request_fingerprint
+from bikem.replay import _request_fingerprint
 
 
 def _record(tmp_path: Path, replies: list[dict]) -> str:
@@ -87,10 +85,15 @@ def test_replay_strict_raises_on_mismatch(tmp_path: Path):
 
     with pytest.raises(RuntimeError):
         with replay(sid, root=tmp_path, strict=True):
-            with httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(500))) as client:
+            with httpx.Client(
+                transport=httpx.MockTransport(lambda req: httpx.Response(500))
+            ) as client:
                 client.post(
                     "https://api.openai.com/v1/chat/completions",
-                    json={"model": "gpt-4o", "messages": [{"role": "user", "content": "DIFFERENT"}]},
+                    json={
+                        "model": "gpt-4o",
+                        "messages": [{"role": "user", "content": "DIFFERENT"}],
+                    },
                 )
 
 

@@ -5,6 +5,7 @@ hash is computed over its own content plus the previous event's hash.
 Tampering is detectable, and replay can verify consistency before trusting
 a recorded response.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -83,7 +84,7 @@ class Event:
         return json.dumps(self.to_dict(), separators=(",", ":"), default=str)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Event":
+    def from_dict(cls, d: dict) -> Event:
         return cls(
             seq=d["seq"],
             type=d["type"],

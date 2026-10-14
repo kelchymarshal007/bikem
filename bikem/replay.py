@@ -8,6 +8,7 @@ Divergence is detected by comparing a canonical hash of each live request
 against the corresponding recorded request. Any mismatch is reported but
 does not stop replay by default -- the caller decides what to do.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,8 +17,8 @@ from typing import Any
 
 import httpx
 
-from .events import Event, EventType, canonical_json, compute_hash
-from .store import SessionStore, load_session
+from .events import Event, EventType, compute_hash
+from .store import load_session
 
 
 @dataclass
@@ -235,6 +236,7 @@ def uninstall() -> None:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+
 class ReplayContext:
     """Returned by bikem.replay(). Use .result after the block exits."""
 
@@ -245,7 +247,7 @@ class ReplayContext:
     def result(self) -> ReplayResult:
         return self._replayer.result
 
-    def __enter__(self) -> "ReplayContext":
+    def __enter__(self) -> ReplayContext:
         install(self._replayer)
         return self
 

@@ -8,11 +8,10 @@ Commands:
     bikem path <id>         Print the raw JSONL file path
     bikem stats             Summary across all sessions
 """
+
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import click
 from rich.console import Console
@@ -174,8 +173,13 @@ def cmd_show(session_id: str, root: str | None, full: bool, type_filter: str | N
         console.print(_summary_line(ev))
         if full:
             payload = json.dumps(ev.payload, indent=2, default=str)
-            console.print(Panel(Syntax(payload, "json", theme="monokai", word_wrap=True),
-                                title=f"seq {ev.seq} payload", border_style="dim"))
+            console.print(
+                Panel(
+                    Syntax(payload, "json", theme="monokai", word_wrap=True),
+                    title=f"seq {ev.seq} payload",
+                    border_style="dim",
+                )
+            )
 
 
 @main.command("verify")
@@ -228,12 +232,14 @@ def cmd_stats(root: str | None) -> None:
             total_events += 1
             by_type[ev.type] = by_type.get(ev.type, 0) + 1
 
-    console.print(Panel.fit(
-        f"[bold]{len(sessions)}[/bold] sessions   "
-        f"[bold]{total_events}[/bold] events   "
-        f"[bold]{_human_size(total_bytes)}[/bold] on disk",
-        border_style="cyan",
-    ))
+    console.print(
+        Panel.fit(
+            f"[bold]{len(sessions)}[/bold] sessions   "
+            f"[bold]{total_events}[/bold] events   "
+            f"[bold]{_human_size(total_bytes)}[/bold] on disk",
+            border_style="cyan",
+        )
+    )
 
     if by_type:
         t = Table(show_header=True, header_style="bold")

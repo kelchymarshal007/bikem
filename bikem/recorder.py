@@ -8,6 +8,7 @@ Two invariants, non-negotiable:
 1. Never break the host app. Every interception is best-effort.
 2. Never consume a stream we do not own.
 """
+
 from __future__ import annotations
 
 import json

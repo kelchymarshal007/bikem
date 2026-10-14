@@ -6,12 +6,13 @@ One file per session at $BIKEM_HOME/sessions/{session_id}.jsonl
 Lock-free by design: one writer per session. The store must never crash
 the host application -- every I/O operation is best-effort.
 """
+
 from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 from .events import (
     GENESIS_HASH,
